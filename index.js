@@ -3,10 +3,14 @@ const { MongoClient, ObjectId } = require("mongodb");
 const cors = require("cors");
 require("dotenv").config();
 
+
+const { betterAuth } = require("better-auth");
+const { mongodbAdapter } = require("better-auth/adapters/mongodb");
+
 const app = express();
 const port = process.env.PORT || 5000;
 
-
+app.use(express.json());
 
 app.use(cors({
   origin: "http://localhost:3000",
@@ -33,7 +37,36 @@ async function runServer() {
     const transactionsCollection = db.collection("transactions");
     const usersCollection = db.collection("user");
 
- 
+    const auth = betterAuth({
+      database: mongodbAdapter(db, {
+        client,
+      }),
+    
+      user: {
+        fields: {
+          role: "role",
+        },
+      },
+      emailAndPassword: {
+        enabled: true,
+        signUp: {
+         
+          additionalFields: {
+            role: {
+              type: "string",
+              required: false,
+              defaultValue: "user", 
+            },
+          },
+        },
+      },
+      socialProviders: {
+        google: {
+          clientId: process.env.GOOGLE_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        },
+      },
+    });
 
     // get all artworks 
     app.get("/api/artworks", async (req, res) => {
@@ -41,13 +74,11 @@ async function runServer() {
         const limit = parseInt(req.query.limit) || 100;
         let artworks;
 
-              
         if (limit === 6) {
           artworks = await artworksCollection
             .aggregate([{ $sample: { size: 6 } }])
             .toArray();
         } else {
-        
           artworks = await artworksCollection
             .find({})
             .sort({ createdAt: -1 })
@@ -85,7 +116,7 @@ async function runServer() {
 
 
     //  User/buyer part
-  
+    
 
     // user transaction
     app.get("/api/user/purchases", async (req, res) => {
@@ -98,9 +129,9 @@ async function runServer() {
       }
     });
 
-   
+     
     // Artist part
-  
+    
 
     // artist mangement list
     app.get("/api/artist/artworks", async (req, res) => {
@@ -158,9 +189,9 @@ async function runServer() {
       }
     });
 
-   
+     
     //  Admin
-    
+      
 
     // Admin analytics part ta
     app.get("/api/admin/analytics", async (req, res) => {
@@ -223,11 +254,8 @@ async function runServer() {
       }
     });
 
-  } catch (error) {
-    console.error("Critical database server handshake failure:", error);
-  }
-}
-app.get("/api/dev/force-admin", async (req, res) => {
+    // get admin user data directly
+    app.get("/api/dev/force-admin", async (req, res) => {
       try {
         const adminUser = await usersCollection.findOne({ email: "arthub@gmail.com" });
         res.status(200).json({ success: true, user: adminUser });
@@ -235,6 +263,11 @@ app.get("/api/dev/force-admin", async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
       }
     });
+
+  } catch (error) {
+    console.error("Critical database server handshake failure:", error);
+  }
+}
 
 runServer();
 
