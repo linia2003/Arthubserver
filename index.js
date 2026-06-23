@@ -227,6 +227,14 @@ async function runServer() {
     console.error("Critical database server handshake failure:", error);
   }
 }
+app.get("/api/dev/force-admin", async (req, res) => {
+      try {
+        const adminUser = await usersCollection.findOne({ email: "arthub@gmail.com" });
+        res.status(200).json({ success: true, user: adminUser });
+      } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+      }
+    });
 
 runServer();
 
