@@ -36,11 +36,13 @@ async function runServer() {
     const transactionsCollection = db.collection("transactions");
     const usersCollection = db.collection("user");
 
-    const auth = betterAuth({
+  const auth = betterAuth({
       database: mongodbAdapter(db, {
         client,
       }),
-    
+      
+      trustedOrigins: ["http://localhost:3000"],
+      
       user: {
         fields: {
           role: "role",
@@ -49,7 +51,6 @@ async function runServer() {
       emailAndPassword: {
         enabled: true,
         signUp: {
-          
           additionalFields: {
             role: {
               type: "string",
