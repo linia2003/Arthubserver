@@ -3,7 +3,6 @@ const { MongoClient, ObjectId } = require("mongodb");
 const cors = require("cors");
 require("dotenv").config();
 
-
 const { betterAuth } = require("better-auth");
 const { mongodbAdapter } = require("better-auth/adapters/mongodb");
 
@@ -50,7 +49,7 @@ async function runServer() {
       emailAndPassword: {
         enabled: true,
         signUp: {
-         
+          
           additionalFields: {
             role: {
               type: "string",
@@ -66,6 +65,31 @@ async function runServer() {
           clientSecret: process.env.GOOGLE_CLIENT_SECRET,
         },
       },
+    });
+
+  
+    app.all("/api/auth/*any", async (req, res) => {
+      try {
+        
+        const fullUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+        const webRequest = new Request(fullUrl, {
+          method: req.method,
+          headers: new Headers(req.headers),
+          body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body)
+        });
+
+        const webResponse = await auth.handler(webRequest);
+        
+       
+        webResponse.headers.forEach((value, key) => res.setHeader(key, value));
+        res.status(webResponse.status);
+        
+        const content = await webResponse.text();
+        return res.send(content);
+      } catch (err) {
+        console.error("Auth routing processing exception:", err);
+        return res.status(500).json({ success: false, message: "Internal auth engine failure" });
+      }
     });
 
     // get all artworks 
@@ -191,7 +215,7 @@ async function runServer() {
 
      
     //  Admin
-      
+     
 
     // Admin analytics part ta
     app.get("/api/admin/analytics", async (req, res) => {
