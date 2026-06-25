@@ -13,7 +13,7 @@ app.use(express.json());
 
 app.use(cors({
   origin: "http://localhost:3000",
-  credentials: true, // 
+  credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -36,29 +36,23 @@ async function runServer() {
     const transactionsCollection = db.collection("transactions");
     const usersCollection = db.collection("user");
 
-  const auth = betterAuth({
+    const auth = betterAuth({
       database: mongodbAdapter(db, {
         client,
       }),
-      
-      trustedOrigins: ["http://localhost:3000"],
-      
+      trustedOrigins: ["http://localhost:3000", "http://127.0.0.1:3000"],
       user: {
         fields: {
           role: "role",
         },
       },
+      account: {
+        fields: {
+          role: "role"
+        }
+      },
       emailAndPassword: {
         enabled: true,
-        signUp: {
-          additionalFields: {
-            role: {
-              type: "string",
-              required: false,
-              defaultValue: "user", 
-            },
-          },
-        },
       },
       socialProviders: {
         google: {
@@ -68,10 +62,42 @@ async function runServer() {
       },
     });
 
-  
-    app.all("/api/auth/*any", async (req, res) => {
+   app.post("/api/auth/register-direct", async (req, res) => {
       try {
-        
+        const { name, email, password, role } = req.body;
+
+        // 1. Check if user already exists in your database
+        const existingUser = await usersCollection.findOne({ email });
+        if (existingUser) {
+          return res.status(400).json({ success: false, message: "Email is already registered." });
+        }
+
+        // 2. 🚀 EXECUTE INTERNAL BETTERAUTH SIGNUP:
+        // This automatically handles password hashing and creates BOTH the user and account records perfectly
+        const authResult = await auth.api.signUpEmail({
+          body: {
+            email,
+            password,
+            name,
+            role: role || "user", // Passes 'artist' or 'user' directly into BetterAuth's creation stream
+          },
+        });
+
+        return res.status(201).json({ 
+          success: true, 
+          message: "User registered with custom role successfully!",
+          data: authResult 
+        });
+
+      } catch (err) {
+        console.error("Direct registration execution error:", err);
+        return res.status(500).json({ success: false, message: err.message });
+      }
+    });
+
+    // 🌟 2. BetterAuth Internal catch-all routing mechanism
+    app.all(/^\/api\/auth(?:\/(.*))?$/, async (req, res) => {
+      try {
         const fullUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
         const webRequest = new Request(fullUrl, {
           method: req.method,
@@ -81,7 +107,6 @@ async function runServer() {
 
         const webResponse = await auth.handler(webRequest);
         
-       
         webResponse.headers.forEach((value, key) => res.setHeader(key, value));
         res.status(webResponse.status);
         
@@ -139,10 +164,6 @@ async function runServer() {
       }
     });
 
-
-    //  User/buyer part
-    
-
     // user transaction
     app.get("/api/user/purchases", async (req, res) => {
       try {
@@ -153,10 +174,6 @@ async function runServer() {
         res.status(500).json({ success: false, message: err.message });
       }
     });
-
-     
-    // Artist part
-    
 
     // artist mangement list
     app.get("/api/artist/artworks", async (req, res) => {
@@ -195,7 +212,7 @@ async function runServer() {
           { _id: ObjectId.isValid(id) ? new ObjectId(id) : id },
           { $set: updateData }
         );
-        res.status(200).json({ success: true, modifiedCount: result.modifiedCount });
+        res.status(200).json({ success: true, updated: result.modifiedCount });
       } catch (err) {
         res.status(500).json({ success: false, message: err.message });
       }
@@ -214,11 +231,7 @@ async function runServer() {
       }
     });
 
-     
-    //  Admin
-     
-
-    // Admin analytics part ta
+    // Admin analytics part
     app.get("/api/admin/analytics", async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments({ role: "user" });
@@ -229,7 +242,6 @@ async function runServer() {
         
         const totalRevenue = salesData.reduce((sum, tx) => sum + (tx.amount || 0), 0);
 
-        // Grouping artworks by category for frontend charts
         const categoryAggregation = await artworksCollection.aggregate([
           { $group: { _id: "$category", count: { $sum: 1 } } }
         ]).toArray();
