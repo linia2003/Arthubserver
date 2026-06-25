@@ -72,7 +72,7 @@ async function runServer() {
           return res.status(400).json({ success: false, message: "Email is already registered." });
         }
 
-        // 2. 🚀 EXECUTE INTERNAL BETTERAUTH SIGNUP:
+        
         // This automatically handles password hashing and creates BOTH the user and account records perfectly
         const authResult = await auth.api.signUpEmail({
           body: {
