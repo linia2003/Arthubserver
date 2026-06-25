@@ -12,7 +12,11 @@ const port = process.env.PORT || 5000;
 app.use(express.json());
 
 app.use(cors({
-  origin: "http://localhost:3000",
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://arthub-mauve.vercel.app" 
+  ],
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
@@ -315,3 +319,7 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log(` Independent API node broadcasting dynamically on port ${port}`);
 });
+
+
+
+module.exports = app;
