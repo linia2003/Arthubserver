@@ -24,30 +24,33 @@ app.use(cors({
 
 const uri = process.env.MONGO_DB_URI;
 if (!uri) {
-  console.error(" ERROR: MONGO_DB_URI is undefined.");
+  console.error("❌ ERROR: MONGO_DB_URI is undefined.");
   process.exit(1);
 }
 
+// Global variable placeholders for reuse across serverless requests
+let client;
+let db;
+let auth;
 
-let client = new MongoClient(uri);
-let db, artworksCollection, transactionsCollection, usersCollection, auth;
-
-
+// 🌟 THE ULTIMATE SERVERLESS MIDDLEWARE FIX: Initializes components dynamically on the first request
 app.use(async (req, res, next) => {
   try {
-    // If connection tunnel doesn't exist yet, construct it lazily
+    if (!client) {
+      client = new MongoClient(uri);
+    }
+    
+    // Establish hot database pool link if it doesn't exist
     if (!db) {
       await client.connect();
       db = client.db("arthub-db");
-      artworksCollection = db.collection("artworks");
-      transactionsCollection = db.collection("transactions");
-      usersCollection = db.collection("user");
+    }
 
-      // Initialize BetterAuth with active collection mappings cleanly
+    // Initialize the auth engine engine dynamically inside the connection tunnel safely
+    if (!auth) {
       auth = betterAuth({
         database: mongodbAdapter(db, {
           client,
-          
           collections: {
             user: "user"
           }
@@ -71,21 +74,23 @@ app.use(async (req, res, next) => {
       });
     }
 
-    // Attach verified collection tunnels directly to the req pipeline context
+    // Bind collection pointers cleanly onto the request pipeline
     req.db = db;
-    req.artworksCollection = artworksCollection;
-    req.transactionsCollection = transactionsCollection;
-    req.usersCollection = usersCollection;
+    req.artworksCollection = db.collection("artworks");
+    req.transactionsCollection = db.collection("transactions");
+    req.usersCollection = db.collection("user");
     req.authInstance = auth;
 
     next();
   } catch (error) {
     console.error("Serverless Database handshake exception:", error);
-    res.status(500).json({ success: false, message: "Database connection failed." });
+    res.status(500).json({ success: false, message: "Database infrastructure handshake failed." });
   }
 });
 
-
+// =========================================================================
+// 🌟 SERVERLESS ROUTE REGISTER REGISTRY
+// =========================================================================
 
 app.post("/api/auth/register-direct", async (req, res) => {
   try {
@@ -95,6 +100,7 @@ app.post("/api/auth/register-direct", async (req, res) => {
       return res.status(400).json({ success: false, message: "Email is already registered." });
     }
 
+    // Guaranteed to be active via lazy evaluation wrapper
     const hashedPassword = await req.authInstance.password.hash(password); 
 
     const userId = new ObjectId();
@@ -330,7 +336,7 @@ app.get("/", (req, res) => {
   res.send("ArtHub Express Backend Gateway is Operational.");
 });
 
-// Kept for local fallback listening instances smoothly
+// Listen parameters handled safely for Vercel hooks mappings
 app.listen(port, () => {
   console.log(` Independent API node broadcasting dynamically on port ${port}`);
 });
