@@ -34,7 +34,7 @@ if (!uri) {
 }
 
 // =========================================================================
-// 2. 💳 STRIPE WEBHOOK ENDPOINT (MUST BE RAW BINARY PARSING, BEFORE express.json())
+// 2. 💳 STRIPE WEBHOOK ENDPOINT (MUST BE RAW BINARY PARSER, BEFORE express.json())
 // =========================================================================
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -51,7 +51,6 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
     const session = event.data.object;
 
     try {
-      // Warm up backup connections if webhook hits before a standard application pipeline requests it
       if (!client) client = new MongoClient(uri);
       if (!db) {
         await client.connect();
@@ -60,7 +59,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
 
       // CASE A: User Subscription Handling
       if (session.metadata.tier) {
-        const userEmail = session.metadata.userEmail;
+        const userEmail = String(session.metadata.userEmail).trim().toLowerCase(); // 🌟 Normalize to lowercase
         const targetTier = session.metadata.tier;
 
         await db.collection("user").updateOne(
@@ -73,25 +72,39 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
       // CASE B: 🎨 Artwork Purchase Multi-Role Ledger Generation
       if (session.metadata.type === "artwork_purchase") {
         const meta = session.metadata;
+        console.log("📥 Webhook received artwork metadata payload:", meta);
+
+        let originalArtwork = null;
+        try {
+          const searchId = ObjectId.isValid(meta.artworkId) ? new ObjectId(meta.artworkId) : meta.artworkId;
+          originalArtwork = await db.collection("artworks").findOne({ _id: searchId });
+        } catch (queryErr) {
+          console.error("⚠️ Non-blocking artwork document lookup exception:", queryErr.message);
+        }
+
+        // 🌟 FORCE STANDARDIZED LOWERCASE STRINGS FOR LEDGER ENTRIES
+        const cleanBuyerEmail = String(meta.buyerEmail).trim().toLowerCase();
+        const cleanArtistEmail = String(originalArtwork?.artistEmail || meta.artistEmail || "").trim().toLowerCase();
 
         const purchaseRecord = {
           artworkId: meta.artworkId,
-          artworkTitle: meta.artworkTitle,
-          amount: parseFloat(meta.amount),
-          userEmail: meta.buyerEmail,    // Triggers user logs fetch
-          buyerName: meta.buyerName,      // Feeds name into artist loops
-          artistEmail: meta.artistEmail,  // Triggers artist sale records
-          artistName: meta.artistName,
-          type: "purchase",               // Category identifier for general tracking
+          artworkTitle: originalArtwork?.title || meta.artworkTitle || "Exhibited Composition",
+          image: originalArtwork?.image || "", 
+          amount: originalArtwork ? parseFloat(originalArtwork.price) : parseFloat(meta.amount || 0),
+          userEmail: cleanBuyerEmail, // Lowercase value saved securely
+          buyerName: meta.buyerName,      
+          artistEmail: cleanArtistEmail,  
+          artistName: originalArtwork?.artistName || meta.artistName || "Exhibited Creator",
+          type: "purchase",               
           date: new Date()
         };
 
-        await db.collection("transactions").insertOne(purchaseRecord);
-        console.log(`🎨 Ledger entry populated! ${meta.buyerName} purchased "${meta.artworkTitle}"`);
+        const insertResult = await db.collection("transactions").insertOne(purchaseRecord);
+        console.log(`✅ Transaction successfully logged with ID: ${insertResult.insertedId} for user: ${cleanBuyerEmail}`);
       }
 
     } catch (dbErr) {
-      console.error("❌ Failed to parse transaction event details inside webhook:", dbErr);
+      console.error("❌ Failed to parse transaction details inside webhook:", dbErr);
       return res.status(500).send("Internal DB adjustment failure");
     }
   }
@@ -162,7 +175,7 @@ app.post("/api/payment/create-checkout", async (req, res) => {
   try {
     const { email, tier, priceAmount } = req.body;
     if (!email || !tier) {
-      return res.status(400).json({ success: false, message: "Missing tracking account validation attributes." });
+      return res.status(400).json({ success: false, message: "Missing tracking attributes." });
     }
 
     const frontendUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
@@ -183,7 +196,7 @@ app.post("/api/payment/create-checkout", async (req, res) => {
           quantity: 1,
         },
       ],
-      metadata: { userEmail: email, tier: tier },
+      metadata: { userEmail: email.trim().toLowerCase(), tier: tier },
       success_url: `${frontendUrl}/dashboard/user?payment_success=true`,
       cancel_url: `${frontendUrl}/dashboard/user?payment_cancelled=true`,
     });
@@ -201,23 +214,23 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
     const { buyerEmail, buyerName, artworkId } = req.body;
 
     if (!buyerEmail || !artworkId) {
-      return res.status(400).json({ success: false, message: "Missing tracking identification parameters." });
+      return res.status(400).json({ success: false, message: "Missing tracking parameters." });
     }
 
     const artwork = await req.artworksCollection.findOne({ 
       _id: ObjectId.isValid(artworkId) ? new ObjectId(artworkId) : artworkId 
     });
     if (!artwork) {
-      return res.status(404).json({ success: false, message: "Artwork missing from marketplace portfolio." });
+      return res.status(404).json({ success: false, message: "Artwork missing from catalog." });
     }
 
-    const userProfile = await req.usersCollection.findOne({ email: buyerEmail });
+    const cleanBuyerEmail = String(buyerEmail).trim().toLowerCase();
+    const userProfile = await req.usersCollection.findOne({ email: cleanBuyerEmail });
     const tier = userProfile?.subscriptionTier || "free";
 
-    // Enforce limits for non-unlimited tiers
     if (tier === "free" || tier === "pro") {
       const currentPurchasesCount = await req.transactionsCollection.countDocuments({ 
-        userEmail: buyerEmail, 
+        userEmail: cleanBuyerEmail, 
         type: "purchase" 
       });
 
@@ -242,7 +255,6 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
             product_data: {
               name: artwork.title,
               description: `Original masterwork compiled by artist ${artwork.artistName || "Exhibited Creator"}.`,
-              images: artwork.image ? [artwork.image] : [],
             },
             unit_amount: Math.round(artwork.price * 100),
           },
@@ -254,7 +266,7 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
         artworkId: artworkId.toString(),
         artworkTitle: artwork.title,
         amount: artwork.price.toString(),
-        buyerEmail: buyerEmail,
+        buyerEmail: cleanBuyerEmail,
         buyerName: buyerName || "Anonymous Collector",
         artistEmail: artwork.artistEmail,
         artistName: artwork.artistName || "Exhibited Creator"
@@ -276,7 +288,9 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
 app.post("/api/auth/register-direct", async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
-    const existingUser = await req.usersCollection.findOne({ email });
+    const cleanEmail = String(email).trim().toLowerCase();
+    
+    const existingUser = await req.usersCollection.findOne({ email: cleanEmail });
     if (existingUser) {
       return res.status(400).json({ success: false, message: "Email is already registered." });
     }
@@ -292,7 +306,7 @@ app.post("/api/auth/register-direct", async (req, res) => {
     await req.usersCollection.insertOne({
       _id: userId,
       name,
-      email,
+      email: cleanEmail,
       emailVerified: false,
       role: role || "user",
       subscriptionTier: "free", 
@@ -304,7 +318,7 @@ app.post("/api/auth/register-direct", async (req, res) => {
     await accountCollection.insertOne({
       _id: new ObjectId(),
       userId: userId,
-      accountId: email,
+      accountId: cleanEmail,
       providerId: "credential",
       password: hashedPassword,
       createdAt: new Date(),
@@ -354,18 +368,19 @@ app.get("/api/artworks/:id", async (req, res) => {
     const { id } = req.params;
     const query = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { _id: id };
     const artwork = await req.artworksCollection.findOne(query);
-    if (!artwork) return res.status(404).json({ success: false, message: "Record missing from cluster." });
+    if (!artwork) return res.status(404).json({ success: false, message: "Record missing." });
     res.status(200).json({ success: true, artwork });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// user transactions history log
+// 🌟 FIX: FORCE LOWERCASE PARSING ON USER TRANSACTION SEARCH ENTRIES
 app.get("/api/user/purchases", async (req, res) => {
   try {
     const { email } = req.query;
-    const history = await req.transactionsCollection.find({ userEmail: email, type: "purchase" }).toArray();
+    const cleanSearchEmail = String(email).trim().toLowerCase(); // Lowercases any query variation
+    const history = await req.transactionsCollection.find({ userEmail: cleanSearchEmail, type: "purchase" }).toArray();
     res.status(200).json({ success: true, history });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -376,7 +391,8 @@ app.get("/api/user/purchases", async (req, res) => {
 app.get("/api/artist/artworks", async (req, res) => {
   try {
     const { email } = req.query;
-    const artworks = await req.artworksCollection.find({ artistEmail: email }).toArray();
+    const cleanSearchEmail = String(email).trim().toLowerCase();
+    const artworks = await req.artworksCollection.find({ artistEmail: cleanSearchEmail }).toArray();
     res.status(200).json({ success: true, artworks });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -386,7 +402,8 @@ app.get("/api/artist/artworks", async (req, res) => {
 // add new artwork
 app.post("/api/artworks", async (req, res) => {
   try {
-    const newArtwork = { ...req.body, price: parseFloat(req.body.price), createdAt: new Date() };
+    const cleanArtistEmail = String(req.body.artistEmail).trim().toLowerCase();
+    const newArtwork = { ...req.body, artistEmail: cleanArtistEmail, price: parseFloat(req.body.price), createdAt: new Date() };
     const result = await req.artworksCollection.insertOne(newArtwork);
     res.status(201).json({ success: true, insertedId: result.insertedId });
   } catch (err) {
@@ -399,6 +416,7 @@ app.put("/api/artworks/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = { ...req.body, price: parseFloat(req.body.price) };
+    if (updateData.artistEmail) updateData.artistEmail = String(updateData.artistEmail).trim().toLowerCase();
     delete updateData._id;
     const result = await req.artworksCollection.updateOne(
       { _id: ObjectId.isValid(id) ? new ObjectId(id) : id },
