@@ -34,7 +34,7 @@ if (!uri) {
 }
 
 // =========================================================================
-// 2. 💳 STRIPE WEBHOOK ENDPOINT (MUST BE RAW BINARY PARSER, BEFORE express.json())
+// 2. 💳 STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
 // =========================================================================
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -59,14 +59,26 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
 
       // CASE A: User Subscription Handling
       if (session.metadata.tier) {
-        const userEmail = String(session.metadata.userEmail).trim().toLowerCase(); // 🌟 Normalize to lowercase
+        const userEmail = String(session.metadata.userEmail).trim().toLowerCase(); 
         const targetTier = session.metadata.tier;
+        const totalPaidAmount = session.amount_total ? session.amount_total / 100 : 0;
 
         await db.collection("user").updateOne(
           { email: userEmail },
           { $set: { subscriptionTier: targetTier, updatedAt: new Date() } }
         );
-        console.log(`✨ Successfully upgraded ${userEmail} to tier: ${targetTier}`);
+
+        // 🌟 FIX: Store record inside transactions collection for full admin financial parity
+        const subscriptionTransaction = {
+          type: "publishing_fee", // Differentiates subscription income from standard purchases
+          userEmail: userEmail,
+          amount: totalPaidAmount,
+          tier: targetTier,
+          date: new Date()
+        };
+
+        await db.collection("transactions").insertOne(subscriptionTransaction);
+        console.log(`✨ Successfully upgraded ${userEmail} to tier: ${targetTier} & logged transaction.`);
       }
 
       // CASE B: 🎨 Artwork Purchase Multi-Role Ledger Generation
@@ -82,7 +94,6 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
           console.error("⚠️ Non-blocking artwork document lookup exception:", queryErr.message);
         }
 
-        // 🌟 FORCE STANDARDIZED LOWERCASE STRINGS FOR LEDGER ENTRIES
         const cleanBuyerEmail = String(meta.buyerEmail).trim().toLowerCase();
         const cleanArtistEmail = String(originalArtwork?.artistEmail || meta.artistEmail || "").trim().toLowerCase();
 
@@ -91,7 +102,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
           artworkTitle: originalArtwork?.title || meta.artworkTitle || "Exhibited Composition",
           image: originalArtwork?.image || "", 
           amount: originalArtwork ? parseFloat(originalArtwork.price) : parseFloat(meta.amount || 0),
-          userEmail: cleanBuyerEmail, // Lowercase value saved securely
+          userEmail: cleanBuyerEmail, 
           buyerName: meta.buyerName,      
           artistEmail: cleanArtistEmail,  
           artistName: originalArtwork?.artistName || meta.artistName || "Exhibited Creator",
@@ -282,13 +293,7 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
   }
 });
 
-// =========================================================================
 // Endpoint C: POST-PAYMENT CONFIRMATION FALLBACK
-// Called by the frontend after Stripe redirects back with ?purchase_success=true
-// This is the reliable path for local dev where webhooks can't reach localhost.
-// In production with a real webhook URL, the webhook handles it first and this
-// call becomes a safe no-op (it checks for duplicates before inserting).
-// =========================================================================
 app.post("/api/payment/confirm-purchase", async (req, res) => {
   try {
     const { buyerEmail, buyerName, artworkId } = req.body;
@@ -299,7 +304,6 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
 
     const cleanBuyerEmail = String(buyerEmail).trim().toLowerCase();
 
-    // Look up the artwork to get accurate price, title, artist info
     const artwork = await req.artworksCollection.findOne({
       _id: ObjectId.isValid(artworkId) ? new ObjectId(artworkId) : artworkId
     });
@@ -308,8 +312,6 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
       return res.status(404).json({ success: false, message: "Artwork not found." });
     }
 
-    // Duplicate guard: don't insert if a record already exists for this buyer+artwork
-    // (means the webhook already fired and handled it correctly)
     const existing = await req.transactionsCollection.findOne({
       userEmail: cleanBuyerEmail,
       artworkId: artworkId.toString(),
@@ -317,7 +319,6 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
     });
 
     if (existing) {
-      // Webhook already handled it — nothing to do, return success silently
       return res.status(200).json({ success: true, alreadyRecorded: true });
     }
 
@@ -343,6 +344,89 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
   } catch (err) {
     console.error("confirm-purchase error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 🌟 FIX: ISOLATED USER PROFILE FETCH WITH CASE-INSENSITIVE EMAIL MATCHING
+app.get("/api/user/profile", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email query missing." });
+    }
+    
+    const cleanEmail = String(email).trim().toLowerCase();
+    const userProfile = await req.usersCollection.findOne({ email: cleanEmail });
+    
+    if (!userProfile) {
+      return res.status(404).json({ success: false, message: "Profile match not found." });
+    }
+    
+    res.status(200).json({ success: true, user: userProfile });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// =========================================================================
+// 🌟 NEW ENDPOINTS: ADDED TO CLEAR SYSTEM GAPS AND REQUIREMENTS
+// =========================================================================
+
+// FIX A: TOP ARTISTS AGGREGATION PIPELINE (FOR HOMEPAGE DRIVEN LOGIC)
+app.get("/api/artists/top", async (req, res) => {
+  try {
+    const topArtists = await req.transactionsCollection.aggregate([
+      { $match: { type: "purchase" } },
+      {
+        $group: {
+          _id: "$artistEmail",
+          artistName: { $first: "$artistName" },
+          totalSalesVolume: { $sum: "$amount" },
+          artworksCount: { $sum: 1 }
+        }
+      },
+      { $sort: { totalSalesVolume: -1 } },
+      { $limit: 3 }
+    ]).toArray();
+
+    res.status(200).json({ success: true, artists: topArtists });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// FIX B: NATIVE INTERACTIVE COMMENTS ROUTE PIPELINES
+app.get("/api/artworks/:id/comments", async (req, res) => {
+  try {
+    const comments = await req.db.collection("comments")
+      .find({ artworkId: req.params.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.status(200).json({ success: true, comments });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post("/api/artworks/:id/comments", async (req, res) => {
+  try {
+    const { userName, userEmail, text } = req.body;
+    if (!text || !userEmail) {
+      return res.status(400).json({ success: false, message: "Missing essential comment attributes." });
+    }
+
+    const commentDoc = {
+      artworkId: req.params.id,
+      userName: userName || "Anonymous Collector",
+      userEmail: String(userEmail).trim().toLowerCase(),
+      text: text,
+      createdAt: new Date()
+    };
+
+    await req.db.collection("comments").insertOne(commentDoc);
+    res.status(201).json({ success: true, comment: commentDoc });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -439,11 +523,11 @@ app.get("/api/artworks/:id", async (req, res) => {
   }
 });
 
-// 🌟 FIX: FORCE LOWERCASE PARSING ON USER TRANSACTION SEARCH ENTRIES
+// FORCE LOWERCASE PARSING ON USER TRANSACTION SEARCH ENTRIES
 app.get("/api/user/purchases", async (req, res) => {
   try {
     const { email } = req.query;
-    const cleanSearchEmail = String(email).trim().toLowerCase(); // Lowercases any query variation
+    const cleanSearchEmail = String(email).trim().toLowerCase(); 
     const history = await req.transactionsCollection.find({ userEmail: cleanSearchEmail, type: "purchase" }).toArray();
     res.status(200).json({ success: true, history });
   } catch (err) {
