@@ -283,6 +283,70 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
 });
 
 // =========================================================================
+// Endpoint C: POST-PAYMENT CONFIRMATION FALLBACK
+// Called by the frontend after Stripe redirects back with ?purchase_success=true
+// This is the reliable path for local dev where webhooks can't reach localhost.
+// In production with a real webhook URL, the webhook handles it first and this
+// call becomes a safe no-op (it checks for duplicates before inserting).
+// =========================================================================
+app.post("/api/payment/confirm-purchase", async (req, res) => {
+  try {
+    const { buyerEmail, buyerName, artworkId } = req.body;
+
+    if (!buyerEmail || !artworkId) {
+      return res.status(400).json({ success: false, message: "Missing required fields." });
+    }
+
+    const cleanBuyerEmail = String(buyerEmail).trim().toLowerCase();
+
+    // Look up the artwork to get accurate price, title, artist info
+    const artwork = await req.artworksCollection.findOne({
+      _id: ObjectId.isValid(artworkId) ? new ObjectId(artworkId) : artworkId
+    });
+
+    if (!artwork) {
+      return res.status(404).json({ success: false, message: "Artwork not found." });
+    }
+
+    // Duplicate guard: don't insert if a record already exists for this buyer+artwork
+    // (means the webhook already fired and handled it correctly)
+    const existing = await req.transactionsCollection.findOne({
+      userEmail: cleanBuyerEmail,
+      artworkId: artworkId.toString(),
+      type: "purchase"
+    });
+
+    if (existing) {
+      // Webhook already handled it — nothing to do, return success silently
+      return res.status(200).json({ success: true, alreadyRecorded: true });
+    }
+
+    const cleanArtistEmail = String(artwork.artistEmail || "").trim().toLowerCase();
+
+    const purchaseRecord = {
+      artworkId: artworkId.toString(),
+      artworkTitle: artwork.title,
+      image: artwork.image || "",
+      amount: parseFloat(artwork.price),
+      userEmail: cleanBuyerEmail,
+      buyerName: buyerName || "Anonymous Collector",
+      artistEmail: cleanArtistEmail,
+      artistName: artwork.artistName || "Exhibited Creator",
+      type: "purchase",
+      date: new Date()
+    };
+
+    await req.transactionsCollection.insertOne(purchaseRecord);
+    console.log(`✅ Fallback confirm-purchase recorded for ${cleanBuyerEmail} → "${artwork.title}"`);
+
+    return res.status(201).json({ success: true });
+  } catch (err) {
+    console.error("confirm-purchase error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// =========================================================================
 // 🌟 ALL OTHER APPLICATION AND BETTER-AUTH ROUTE HANDLING
 // =========================================================================
 app.post("/api/auth/register-direct", async (req, res) => {
