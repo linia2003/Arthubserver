@@ -4,13 +4,10 @@ const { MongoClient, ObjectId } = require("mongodb");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-const { betterAuth } = require("better-auth");
-const { mongodbAdapter } = require("better-auth/adapters/mongodb");
-
 const app = express();
 const port = process.env.PORT || 5000;
 
-// 1. ALLOW CORS FOR FRONTEND DOMAINS (MUST RUN FIRST)
+// 1. ALLOW CORS FOR FRONTEND DOMAINS
 app.use(cors({
   origin: [
     "http://localhost:3000",
@@ -29,30 +26,22 @@ let auth;
 
 const uri = process.env.MONGO_DB_URI;
 if (!uri) {
-  console.error("❌ ERROR: MONGO_DB_URI is undefined.");
-  process.exit(1);
+  console.error("❌ ERROR: MONGO_DB_URI is undefined inside environment variables.");
 }
 
 // Helper to guarantee database pool connectivity is alive inside explicit standalone endpoints
-
 async function ensureDbConnected() {
   if (!client) {
-    client = new MongoClient(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-  }
+  client = new MongoClient(uri);
+}
   if (!db) {
     await client.connect();
     db = client.db("arthub-db");
   }
-  return db; // Ensure it returns successfully
+  return db;
 }
 
-
 // 2. 💳 STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
-
-
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -81,9 +70,8 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
           { $set: { subscriptionTier: targetTier, updatedAt: new Date() } }
         );
 
-        // Store record inside transactions collection for full admin financial parity
         const subscriptionTransaction = {
-          type: "publishing_fee", // Differentiates subscription income from standard purchases
+          type: "publishing_fee", 
           userEmail: userEmail,
           amount: totalPaidAmount,
           tier: targetTier,
@@ -110,7 +98,6 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
         const cleanBuyerEmail = String(meta.buyerEmail).trim().toLowerCase();
         const cleanArtistEmail = String(originalArtwork?.artistEmail || meta.artistEmail || "").trim().toLowerCase();
 
-        // Duplicate Guard Check before processing Webhook write operation
         const existingTx = await db.collection("transactions").findOne({
           userEmail: cleanBuyerEmail,
           artworkId: meta.artworkId,
@@ -147,10 +134,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
   res.json({ received: true });
 });
 
-
 app.use(express.json());
-
-
 
 // 1. Force Subscription Upgrade Fallback Write Engine
 app.post("/api/payment/confirm-subscription", async (req, res) => {
@@ -164,13 +148,11 @@ app.post("/api/payment/confirm-subscription", async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanTier = String(tier).trim().toLowerCase();
 
-    // Directly alter database state profile document
     await db.collection("user").updateOne(
       { email: cleanEmail },
       { $set: { subscriptionTier: cleanTier, updatedAt: new Date() } }
     );
 
-    // Double-Write protection limit check ledger logic
     const existingTx = await db.collection("transactions").findOne({
       userEmail: cleanEmail,
       type: "publishing_fee",
@@ -250,22 +232,30 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
   }
 });
 
-
 // 4. DATABASE & AUTH ENGINE POOL INITIALIZATION MIDDLEWARE
-
 app.use(async (req, res, next) => {
   try {
     await ensureDbConnected();
     if (!auth) {
+      // Dynamic import solves ERR_REQUIRE_ESM since middleware is an async runtime function
+      const { betterAuth } = await import("better-auth");
+      const { mongodbAdapter } = await import("better-auth/adapters/mongodb");
+
       auth = betterAuth({
-        database: mongodbAdapter(db, {
-          client,
-          collections: { user: "user" }
-        }),
-        advanced: {
-          crossSubdomainCookie: true 
-        },
-        trustedOrigins: ["http://localhost:3000", "http://127.0.0.1:3000", "https://arthub-mauve.vercel.app"],
+  database: mongodbAdapter(db, {
+    client,
+    collections: { user: "user" }
+  }),
+  advanced: {
+    crossSubdomainCookie: true 
+  },
+ 
+  trustedOrigins: [
+    "http://localhost:3000", 
+    "http://127.0.0.1:3000", 
+    "https://arthub-mauve.vercel.app",
+    "https://arthub-server-ten.vercel.app"
+  ],
         user: {
           additionalFields: {
             role: { type: "string", defaultValue: "user", input: false },
@@ -430,7 +420,7 @@ app.get("/api/user/profile", async (req, res) => {
   }
 });
 
-// 1. Fetch Comments for an Artwork (Open to all visitors)
+// 1. Fetch Comments for an Artwork
 app.get("/api/artworks/:id/comments", async (req, res) => {
   try {
     const comments = await req.db.collection("comments")
@@ -443,7 +433,7 @@ app.get("/api/artworks/:id/comments", async (req, res) => {
   }
 });
 
-// 2. Post a Comment (CRITICAL: Checks if user has a purchase record first)
+// 2. Post a Comment
 app.post("/api/artworks/:id/comments", async (req, res) => {
   try {
     const { userName, userEmail, text } = req.body;
@@ -454,7 +444,6 @@ app.post("/api/artworks/:id/comments", async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing essential comment attributes." });
     }
 
-    // Verify if the user has a valid purchase transaction record
     const purchaseRecord = await req.transactionsCollection.findOne({
       userEmail: cleanBuyerEmail,
       artworkId: artworkId.toString(),
@@ -483,7 +472,7 @@ app.post("/api/artworks/:id/comments", async (req, res) => {
   }
 });
 
-// 3. Edit an Existing Comment (Owner Only)
+// 3. Edit an Existing Comment
 app.put("/api/comments/:commentId", async (req, res) => {
   try {
     const { commentId } = req.params;
@@ -493,7 +482,6 @@ app.put("/api/comments/:commentId", async (req, res) => {
     const targetComment = await req.db.collection("comments").findOne({ _id: new ObjectId(commentId) });
     if (!targetComment) return res.status(404).json({ success: false, message: "Comment not found." });
 
-    // Protect ownership identity parameters
     if (targetComment.userEmail !== cleanEmail) {
       return res.status(401).json({ success: false, message: "Unauthorized action." });
     }
@@ -508,7 +496,7 @@ app.put("/api/comments/:commentId", async (req, res) => {
   }
 });
 
-// 4. Delete a Comment (Owner Only)
+// 4. Delete a Comment
 app.delete("/api/comments/:commentId", async (req, res) => {
   try {
     const { commentId } = req.params;
@@ -529,7 +517,7 @@ app.delete("/api/comments/:commentId", async (req, res) => {
   }
 });
 
-// TOP ARTISTS AGGREGATION PIPELINE (FOR HOMEPAGE DRIVEN LOGIC)
+// TOP ARTISTS AGGREGATION PIPELINE
 app.get("/api/artists/top", async (req, res) => {
   try {
     const topArtists = await req.transactionsCollection.aggregate([
@@ -616,7 +604,6 @@ app.all(/^\/api\/auth(?:\/(.*))?$/, async (req, res) => {
   }
 });
 
-// get all artworks
 app.get("/api/artworks", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
@@ -629,7 +616,6 @@ app.get("/api/artworks", async (req, res) => {
   }
 });
 
-// fetch artwork by id
 app.get("/api/artworks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -642,7 +628,6 @@ app.get("/api/artworks/:id", async (req, res) => {
   }
 });
 
-// get purchases
 app.get("/api/user/purchases", async (req, res) => {
   try {
     const { email } = req.query;
@@ -654,7 +639,6 @@ app.get("/api/user/purchases", async (req, res) => {
   }
 });
 
-//get ALL user transactions (purchases + subscription upgrades)
 app.get("/api/user/transactions", async (req, res) => {
   try {
     const { email } = req.query;
@@ -672,7 +656,6 @@ app.get("/api/user/transactions", async (req, res) => {
   }
 });
 
-// artist management list
 app.get("/api/artist/artworks", async (req, res) => {
   try {
     const { email } = req.query;
@@ -684,7 +667,6 @@ app.get("/api/artist/artworks", async (req, res) => {
   }
 });
 
-// add new artwork
 app.post("/api/artworks", async (req, res) => {
   try {
     const cleanArtistEmail = String(req.body.artistEmail).trim().toLowerCase();
@@ -696,7 +678,6 @@ app.post("/api/artworks", async (req, res) => {
   }
 });
 
-// edit artwork
 app.put("/api/artworks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -713,7 +694,6 @@ app.put("/api/artworks/:id", async (req, res) => {
   }
 });
 
-// delete artwork
 app.delete("/api/artworks/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -724,7 +704,6 @@ app.delete("/api/artworks/:id", async (req, res) => {
   }
 });
 
-// Admin metrics endpoints
 app.get("/api/admin/analytics", async (req, res) => {
   try {
     const totalUsers = await req.usersCollection.countDocuments({ role: "user" });
