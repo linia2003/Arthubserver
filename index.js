@@ -1,4 +1,4 @@
-require("dotenv").config(); // 🌟 MUST BE FIRST LINE to map environment variables safely
+require("dotenv").config(); 
 const express = require("express");
 const { MongoClient, ObjectId } = require("mongodb");
 const cors = require("cors");
@@ -42,9 +42,9 @@ async function ensureDbConnected() {
   }
 }
 
-// =========================================================================
+
 // 2. 💳 STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
-// =========================================================================
+
 
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -140,14 +140,10 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
   res.json({ received: true });
 });
 
-// =========================================================================
-// 3. ⚙️ ACTIVATE JSON BODY PARSING FOR REMAINING ENDPOINTS
-// =========================================================================
+
 app.use(express.json());
 
-// =========================================================================
-// 🎯 LOCAL TUNNEL BYPASS: FRONTSIDE ROUTING CALLBACK CONFIRMATIONS
-// =========================================================================
+
 
 // 1. Force Subscription Upgrade Fallback Write Engine
 app.post("/api/payment/confirm-subscription", async (req, res) => {
@@ -247,9 +243,9 @@ app.post("/api/payment/confirm-purchase", async (req, res) => {
   }
 });
 
-// =========================================================================
+
 // 4. DATABASE & AUTH ENGINE POOL INITIALIZATION MIDDLEWARE
-// =========================================================================
+
 app.use(async (req, res, next) => {
   try {
     await ensureDbConnected();
