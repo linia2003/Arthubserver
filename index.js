@@ -611,6 +611,24 @@ app.get("/api/user/purchases", async (req, res) => {
   }
 });
 
+// ✅ FIX: get ALL user transactions (purchases + subscription upgrades)
+app.get("/api/user/transactions", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email query missing." });
+    }
+    const cleanSearchEmail = String(email).trim().toLowerCase();
+    const allTransactions = await req.transactionsCollection
+      .find({ userEmail: cleanSearchEmail })
+      .sort({ date: -1 })
+      .toArray();
+    res.status(200).json({ success: true, transactions: allTransactions });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // artist management list
 app.get("/api/artist/artworks", async (req, res) => {
   try {
