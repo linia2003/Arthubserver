@@ -41,7 +41,7 @@ async function ensureDbConnected() {
   return db;
 }
 
-// 2. 💳 STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
+// 2.  STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -588,7 +588,14 @@ app.post("/api/auth/register-direct", async (req, res) => {
 
 app.all(/^\/api\/auth(?:\/(.*))?$/, async (req, res) => {
   try {
-    const fullUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+    // 💡 FIX: Read the forwarded host if it exists, otherwise fall back to standard host
+    const host = req.headers["x-forwarded-host"] || req.get("host");
+    
+    // Also check if the protocol was forwarded (Vercel uses https)
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol;
+    
+    const fullUrl = `${protocol}://${host}${req.originalUrl}`;
+    
     const webRequest = new Request(fullUrl, {
       method: req.method,
       headers: new Headers(req.headers),
@@ -600,6 +607,7 @@ app.all(/^\/api\/auth(?:\/(.*))?$/, async (req, res) => {
     res.status(webResponse.status);
     return res.send(await webResponse.text());
   } catch (err) {
+    console.error("Internal auth engine failure:", err);
     return res.status(500).json({ success: false, message: "Internal auth engine failure" });
   }
 });
