@@ -33,9 +33,19 @@ if (!uri) {
   process.exit(1);
 }
 
+// Helper to guarantee database pool connectivity is alive inside explicit standalone endpoints
+async function ensureDbConnected() {
+  if (!client) client = new MongoClient(uri);
+  if (!db) {
+    await client.connect();
+    db = client.db("arthub-db");
+  }
+}
+
 // =========================================================================
 // 2. 💳 STRIPE WEBHOOK ENDPOINT (HANDLES SUBSCRIPTIONS & ARTWORK LEDGERS)
 // =========================================================================
+
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -51,11 +61,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
     const session = event.data.object;
 
     try {
-      if (!client) client = new MongoClient(uri);
-      if (!db) {
-        await client.connect();
-        db = client.db("arthub-db");
-      }
+      await ensureDbConnected();
 
       // CASE A: User Subscription Handling
       if (session.metadata.tier) {
@@ -81,7 +87,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
         console.log(`✨ Successfully upgraded ${userEmail} to tier: ${targetTier} & logged transaction.`);
       }
 
-      // CASE B: 🎨 Artwork Purchase Multi-Role Ledger Generation
+      // CASE B: Artwork Purchase Multi-Role Ledger Generation
       if (session.metadata.type === "artwork_purchase") {
         const meta = session.metadata;
         console.log("📥 Webhook received artwork metadata payload:", meta);
@@ -97,7 +103,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
         const cleanBuyerEmail = String(meta.buyerEmail).trim().toLowerCase();
         const cleanArtistEmail = String(originalArtwork?.artistEmail || meta.artistEmail || "").trim().toLowerCase();
 
-        // 🌟 FIX (Bug 4): Duplicate Guard Check before processing Webhook write operation
+        // Duplicate Guard Check before processing Webhook write operation
         const existingTx = await db.collection("transactions").findOne({
           userEmail: cleanBuyerEmail,
           artworkId: meta.artworkId,
@@ -134,19 +140,119 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }), asyn
   res.json({ received: true });
 });
 
-// 3. NOW ACTIVATE JSON BODY PARSING FOR REMAINING ENDPOINTS
+// =========================================================================
+// 3. ⚙️ ACTIVATE JSON BODY PARSING FOR REMAINING ENDPOINTS
+// =========================================================================
 app.use(express.json());
 
+// =========================================================================
+// 🎯 LOCAL TUNNEL BYPASS: FRONTSIDE ROUTING CALLBACK CONFIRMATIONS
+// =========================================================================
+
+// 1. Force Subscription Upgrade Fallback Write Engine
+app.post("/api/payment/confirm-subscription", async (req, res) => {
+  try {
+    await ensureDbConnected();
+    const { email, tier } = req.body;
+    if (!email || !tier) {
+      return res.status(400).json({ success: false, message: "Missing required tracking tokens." });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanTier = String(tier).trim().toLowerCase();
+
+    // Directly alter database state profile document
+    await db.collection("user").updateOne(
+      { email: cleanEmail },
+      { $set: { subscriptionTier: cleanTier, updatedAt: new Date() } }
+    );
+
+    // Double-Write protection limit check ledger logic
+    const existingTx = await db.collection("transactions").findOne({
+      userEmail: cleanEmail,
+      type: "publishing_fee",
+      tier: cleanTier
+    });
+
+    if (!existingTx) {
+      const tierPrices = { pro: 9.99, premium: 19.99 };
+      await db.collection("transactions").insertOne({
+        type: "publishing_fee",
+        userEmail: cleanEmail,
+        amount: tierPrices[cleanTier] || 0,
+        tier: cleanTier,
+        date: new Date()
+      });
+    }
+
+    console.log(`[Bypass Handshake] Successfully forced tier upgrade for ${cleanEmail} -> ${cleanTier}`);
+    return res.status(200).json({ success: true, tier: cleanTier });
+  } catch (err) {
+    console.error("Local sync subscriber routing exception:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 2. Force Artwork Purchase Fallback Write Engine
+app.post("/api/payment/confirm-purchase", async (req, res) => {
+  try {
+    await ensureDbConnected();
+    const { buyerEmail, buyerName, artworkId } = req.body;
+    if (!buyerEmail || !artworkId) {
+      return res.status(400).json({ success: false, message: "Missing required fields." });
+    }
+
+    const cleanBuyerEmail = String(buyerEmail).trim().toLowerCase();
+
+    const artwork = await db.collection("artworks").findOne({
+      _id: ObjectId.isValid(artworkId) ? new ObjectId(artworkId) : artworkId
+    });
+
+    if (!artwork) {
+      return res.status(404).json({ success: false, message: "Artwork not found." });
+    }
+
+    const existing = await db.collection("transactions").findOne({
+      userEmail: cleanBuyerEmail,
+      artworkId: artworkId.toString(),
+      type: "purchase"
+    });
+
+    if (existing) {
+      return res.status(200).json({ success: true, alreadyRecorded: true });
+    }
+
+    const cleanArtistEmail = String(artwork.artistEmail || "").trim().toLowerCase();
+
+    const purchaseRecord = {
+      artworkId: artworkId.toString(),
+      artworkTitle: artwork.title,
+      image: artwork.image || "",
+      amount: parseFloat(artwork.price),
+      userEmail: cleanBuyerEmail,
+      buyerName: buyerName || "Anonymous Collector",
+      artistEmail: cleanArtistEmail,
+      artistName: artwork.artistName || "Exhibited Creator",
+      type: "purchase",
+      date: new Date()
+    };
+
+    await db.collection("transactions").insertOne(purchaseRecord);
+    console.log(`✅ Fallback confirm-purchase recorded for ${cleanBuyerEmail} → "${artwork.title}"`);
+
+    return res.status(201).json({ success: true });
+  } catch (err) {
+    console.error("Local sync purchase logging failure:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// =========================================================================
 // 4. DATABASE & AUTH ENGINE POOL INITIALIZATION MIDDLEWARE
+// =========================================================================
 app.use(async (req, res, next) => {
   try {
-    if (!client) {
-      client = new MongoClient(uri);
-    }
-    if (!db) {
-      await client.connect();
-      db = client.db("arthub-db");
-    }
+    await ensureDbConnected();
     if (!auth) {
       auth = betterAuth({
         database: mongodbAdapter(db, {
@@ -188,10 +294,6 @@ app.use(async (req, res, next) => {
   }
 });
 
-// =========================================================================
-// 5. 💳 STRIPE CHECKOUT SESSION ROUTE MAPPINGS
-// =========================================================================
-
 // Endpoint A: Subscription Tier Plan Payments
 app.post("/api/payment/create-checkout", async (req, res) => {
   try {
@@ -219,7 +321,7 @@ app.post("/api/payment/create-checkout", async (req, res) => {
         },
       ],
       metadata: { userEmail: email.trim().toLowerCase(), tier: tier },
-      success_url: `${frontendUrl}/dashboard/user?payment_success=true`,
+      success_url: `${frontendUrl}/dashboard/user?payment_success=true&tier=${tier}`,
       cancel_url: `${frontendUrl}/dashboard/user?payment_cancelled=true`,
     });
 
@@ -230,7 +332,7 @@ app.post("/api/payment/create-checkout", async (req, res) => {
   }
 });
 
-// Endpoint B: 🎨 Artwork Purchase Flow with Tier Checking Limits Guard
+// Endpoint B: Artwork Purchase Flow with Tier Checking Limits Guard
 app.post("/api/payment/create-artwork-checkout", async (req, res) => {
   try {
     const { buyerEmail, buyerName, artworkId } = req.body;
@@ -293,7 +395,7 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
         artistEmail: artwork.artistEmail,
         artistName: artwork.artistName || "Exhibited Creator"
       },
-      success_url: `${frontendUrl}/dashboard/user?purchase_success=true`,
+      success_url: `${frontendUrl}/dashboard/user?purchase_success=true&artworkId=${artworkId}&buyerName=${encodeURIComponent(buyerName || "Collector")}`,
       cancel_url: `${frontendUrl}/browse?purchase_cancelled=true`,
     });
 
@@ -301,60 +403,6 @@ app.post("/api/payment/create-artwork-checkout", async (req, res) => {
   } catch (err) {
     console.error("Artwork checkout creation fail:", err.message);
     res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// Endpoint C: POST-PAYMENT CONFIRMATION FALLBACK
-app.post("/api/payment/confirm-purchase", async (req, res) => {
-  try {
-    const { buyerEmail, buyerName, artworkId } = req.body;
-
-    if (!buyerEmail || !artworkId) {
-      return res.status(400).json({ success: false, message: "Missing required fields." });
-    }
-
-    const cleanBuyerEmail = String(buyerEmail).trim().toLowerCase();
-
-    const artwork = await req.artworksCollection.findOne({
-      _id: ObjectId.isValid(artworkId) ? new ObjectId(artworkId) : artworkId
-    });
-
-    if (!artwork) {
-      return res.status(404).json({ success: false, message: "Artwork not found." });
-    }
-
-    const existing = await req.transactionsCollection.findOne({
-      userEmail: cleanBuyerEmail,
-      artworkId: artworkId.toString(),
-      type: "purchase"
-    });
-
-    if (existing) {
-      return res.status(200).json({ success: true, alreadyRecorded: true });
-    }
-
-    const cleanArtistEmail = String(artwork.artistEmail || "").trim().toLowerCase();
-
-    const purchaseRecord = {
-      artworkId: artworkId.toString(),
-      artworkTitle: artwork.title,
-      image: artwork.image || "",
-      amount: parseFloat(artwork.price),
-      userEmail: cleanBuyerEmail,
-      buyerName: buyerName || "Anonymous Collector",
-      artistEmail: cleanArtistEmail,
-      artistName: artwork.artistName || "Exhibited Creator",
-      type: "purchase",
-      date: new Date()
-    };
-
-    await req.transactionsCollection.insertOne(purchaseRecord);
-    console.log(`✅ Fallback confirm-purchase recorded for ${cleanBuyerEmail} → "${artwork.title}"`);
-
-    return res.status(201).json({ success: true });
-  } catch (err) {
-    console.error("confirm-purchase error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -378,10 +426,6 @@ app.get("/api/user/profile", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
-
-// =========================================================================
-// 💬 SECURE COMMENT SYSTEM ENDPOINTS (VERIFIES ELIGIBILITY & OWNERSHIP)
-// =========================================================================
 
 // 1. Fetch Comments for an Artwork (Open to all visitors)
 app.get("/api/artworks/:id/comments", async (req, res) => {
@@ -407,7 +451,7 @@ app.post("/api/artworks/:id/comments", async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing essential comment attributes." });
     }
 
-    // 🌟 REQUIREMENT CHECK: Verify if the user has a valid purchase transaction record
+    // Verify if the user has a valid purchase transaction record
     const purchaseRecord = await req.transactionsCollection.findOne({
       userEmail: cleanBuyerEmail,
       artworkId: artworkId.toString(),
@@ -425,7 +469,7 @@ app.post("/api/artworks/:id/comments", async (req, res) => {
       artworkId: artworkId,
       userName: userName || "Anonymous Collector",
       userEmail: cleanBuyerEmail,
-      comment: text, // Maps directly to your schema guideline
+      comment: text, 
       createdAt: new Date()
     };
 
@@ -465,7 +509,7 @@ app.put("/api/comments/:commentId", async (req, res) => {
 app.delete("/api/comments/:commentId", async (req, res) => {
   try {
     const { commentId } = req.params;
-    const { userEmail } = req.body; // Sent via request body for secure deletion check
+    const { userEmail } = req.body; 
     const cleanEmail = String(userEmail).trim().toLowerCase();
 
     const targetComment = await req.db.collection("comments").findOne({ _id: new ObjectId(commentId) });
@@ -482,11 +526,7 @@ app.delete("/api/comments/:commentId", async (req, res) => {
   }
 });
 
-// =========================================================================
-// 🌟 ALL OTHER SYSTEM APPLICATION ROUTE ENDPOINTS
-// =========================================================================
-
-// FIX A: TOP ARTISTS AGGREGATION PIPELINE (FOR HOMEPAGE DRIVEN LOGIC)
+// TOP ARTISTS AGGREGATION PIPELINE (FOR HOMEPAGE DRIVEN LOGIC)
 app.get("/api/artists/top", async (req, res) => {
   try {
     const topArtists = await req.transactionsCollection.aggregate([
@@ -611,7 +651,7 @@ app.get("/api/user/purchases", async (req, res) => {
   }
 });
 
-// ✅ FIX: get ALL user transactions (purchases + subscription upgrades)
+//get ALL user transactions (purchases + subscription upgrades)
 app.get("/api/user/transactions", async (req, res) => {
   try {
     const { email } = req.query;
