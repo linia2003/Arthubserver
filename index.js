@@ -10,7 +10,7 @@ const { mongodbAdapter } = require("better-auth/adapters/mongodb");
 const app = express();
 const port = process.env.PORT || 5000;
 
-// 1. ALLOW CORS FOR FRONTEND DOMAINS
+// 1. ALLOW CORS FOR FRONTEND DOMAINS (MUST RUN FIRST)
 app.use(cors({
   origin: [
     "http://localhost:3000",
@@ -34,12 +34,19 @@ if (!uri) {
 }
 
 // Helper to guarantee database pool connectivity is alive inside explicit standalone endpoints
+
 async function ensureDbConnected() {
-  if (!client) client = new MongoClient(uri);
+  if (!client) {
+    client = new MongoClient(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+  }
   if (!db) {
     await client.connect();
     db = client.db("arthub-db");
   }
+  return db; // Ensure it returns successfully
 }
 
 
