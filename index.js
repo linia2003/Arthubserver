@@ -588,21 +588,27 @@ app.post("/api/auth/register-direct", async (req, res) => {
 
 app.all(/^\/api\/auth(?:\/(.*))?$/, async (req, res) => {
   try {
-    // 💡 FIX: Read the forwarded host if it exists, otherwise fall back to standard host
     const host = req.headers["x-forwarded-host"] || req.get("host");
-    
-    // Also check if the protocol was forwarded (Vercel uses https)
     const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-    
     const fullUrl = `${protocol}://${host}${req.originalUrl}`;
     
+    // 💡 Fix: Merge clean forwarded headers explicitly into the web request context
+    const headers = new Headers(req.headers);
+    headers.set("x-forwarded-host", host);
+    headers.set("x-forwarded-proto", protocol);
+    
+    const hasBody = !["GET", "HEAD"].includes(req.method);
+
     const webRequest = new Request(fullUrl, {
       method: req.method,
-      headers: new Headers(req.headers),
-      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body)
+      headers: headers,
+      // Pass the raw text or stringified body correctly if present
+      body: hasBody ? (typeof req.body === "string" ? req.body : JSON.stringify(req.body)) : undefined
     });
 
     const webResponse = await req.authInstance.handler(webRequest); 
+    
+    // Send back cookies and response configurations accurately
     webResponse.headers.forEach((value, key) => res.setHeader(key, value));
     res.status(webResponse.status);
     return res.send(await webResponse.text());
